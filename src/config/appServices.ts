@@ -5,6 +5,7 @@ import { addReview } from '../app/add-review';
 import type { AddReviewCommand, AddReviewResult } from '../app/add-review';
 import { FakeReviewService } from '../infra/fake-review-service';
 import { HttpReviewService } from '../infra/http-review-service';
+import { createFetchWithRetry } from '../infra/fetch-retry';
 import { seedReviews } from '../seed/reviews';
 
 // Lazy singleton for the app's ReviewService implementation.
@@ -20,13 +21,24 @@ function createReviewServiceFromEnv(): ReviewService {
   const baseUrl = env.VITE_REVIEWS_BASE_URL;
   const useSeedData = env.VITE_USE_SEED_DATA === 'true';
 
+  // Create fetch with retry for HTTP requests
+  const fetchWithRetry = createFetchWithRetry(fetch, {
+    maxRetries: 3,
+    initialDelayMs: 200,
+    maxDelayMs: 5000,
+  });
+
   if (kind === 'fake') {
     return new FakeReviewService(useSeedData ? seedReviews : []);
   }
-  if (kind === 'http') return new HttpReviewService({ baseUrl });
+  if (kind === 'http') {
+    return new HttpReviewService({ baseUrl, http: fetchWithRetry });
+  }
 
   // Auto-detect: if a base URL is provided, prefer HTTP; otherwise use fake.
-  if (baseUrl) return new HttpReviewService({ baseUrl });
+  if (baseUrl) {
+    return new HttpReviewService({ baseUrl, http: fetchWithRetry });
+  }
   return new FakeReviewService(useSeedData ? seedReviews : []);
 }
 
