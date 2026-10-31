@@ -1,4 +1,8 @@
-import type { ListReviewsOutput, ReviewDeps } from './review-service';
+import type {
+  ListReviewsOutput,
+  ReviewDeps,
+  ReviewRequestOptions,
+} from './review-service';
 
 export type ListReviewsResult = {
   readonly success: true;
@@ -7,7 +11,8 @@ export type ListReviewsResult = {
 
 export async function listReviews(
   deps: ReviewDeps,
+  options?: ReviewRequestOptions,
 ): Promise<ListReviewsResult> {
-  const data = await deps.reviewService.listReviews();
+  const data = await deps.reviewService.listReviews(options);
   return { success: true, data };
 }

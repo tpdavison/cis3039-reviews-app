@@ -12,6 +12,7 @@
     "preview": "vite preview",
     "build-only": "vite build",
     "type-check": "vue-tsc --build",
+    "demo:retry": "node scripts/retry-demo-api.mjs",
     "demo:domain": "node scripts/run-demo.mjs /scripts/demo-domain.ts",
     "demo:reviews": "node scripts/run-demo.mjs /scripts/demo-reviews.ts",
     "format": "prettier --write src/"

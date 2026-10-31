@@ -1,4 +1,4 @@
-import { inject, ref } from 'vue';
+import { inject, onScopeDispose, ref } from 'vue';
 import type { Ref } from 'vue';
 import { addReview as runAddReview } from '../app/add-review';
 import type { AddReviewCommand } from '../app/add-review';
@@ -38,19 +38,26 @@ export function useReviews(): UseReviews {
   const loadError = ref<string | null>(null);
   const submitError = ref<string | null>(null);
   const submitIssues = ref<readonly ValidationIssue[]>([]);
+  let activeLoad: AbortController | undefined;
+  onScopeDispose(() => activeLoad?.abort());
 
   const fetchReviews = async (): Promise<void> => {
     if (loading.value) return;
     loading.value = true;
     loadError.value = null;
+    const controller = new AbortController();
+    activeLoad = controller;
     try {
-      const result = await listReviews(deps);
+      const result = await listReviews(deps, { signal: controller.signal });
+      if (controller.signal.aborted) return;
       reviews.value = newestFirst(result.data.reviews);
       totalCount.value = result.data.totalCount;
     } catch {
+      if (controller.signal.aborted) return;
       console.error('Review list request failed.');
       loadError.value = 'Reviews could not be loaded. Please try again.';
     } finally {
+      activeLoad = undefined;
       loading.value = false;
     }
   };
@@ -76,7 +83,7 @@ export function useReviews(): UseReviews {
     } catch {
       console.error('Review submission failed.');
       submitError.value =
-        'Your review could not be submitted. Please try again.';
+        'We could not confirm whether your review was saved. Refresh the list before submitting again.';
       return { status: 'failure' };
     } finally {
       adding.value = false;

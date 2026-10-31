@@ -1,10 +1,16 @@
-# Week 5 Reviews SPA
+# Reviews SPA — Week 6 HTTP retries
 
 A small Vue and TypeScript SPA for the CIS3039 deployment, configuration and
 CORS lab. It can use temporary in-browser data or the separately deployed
 Reviews API without changing its application use cases. The browser executes the
 SPA; Azure Storage hosts its built static files. This is manual deployment and
 configuration practice before later CI/CD work; assessment requirements are unchanged.
+
+In Week 6, use this example to explore how bounded HTTP retries can help a
+browser application recover from brief failures. GET requests can be retried;
+POST requests are sent once to avoid accidentally repeating a write.
+See **HTTP retries: behaviour and local demonstration** below to observe this
+behaviour without Azure.
 
 A development environment may run the API locally with dedicated cloud persistence.
 The test environment is a fully deployed system with its own configuration and data.
@@ -20,6 +26,13 @@ select your **Source** folder. Open the cloned folder and choose
 **Dev Containers: Reopen in Container**; wait for it to finish before using its
 terminal. Keep the API dev host running in its own container/window for comparison.
 
+Select the supplied retry branch before continuing:
+
+```bash
+git switch feature/http-retry
+git branch --show-current
+```
+
 Create an empty **private** GitHub repository for this example, leaving the README,
 licence and `.gitignore` options unselected. Copy its HTTPS URL. In the container's
 Bash terminal at the SPA repository root, replace the placeholder URL below with
@@ -32,10 +45,11 @@ git branch --show-current
 ```
 
 Check that both `origin` entries identify your private repository and the current
-branch is `main`. Correct any mismatch before pushing the existing history:
+branch is `feature/http-retry`. Correct any mismatch before pushing the existing
+history:
 
 ```bash
-git push -u origin main
+git push -u origin feature/http-retry
 ```
 
 Refresh your GitHub repository and confirm the files are present. Preserve the
@@ -43,10 +57,8 @@ cloned history and keep this practice separate from assessment work. The example
 already contains its project; do not scaffold another one over it.
 
 Run the following commands from the repository root inside the Dev Container.
-The configuration selects `ghcr.io/tpdavison/devops-labs:2026-latest`; this is a
-moving tag within the 2026 course image, not an immutable version. `package.json`
-declares Node.js `22.x`; record the installed Node/npm versions when diagnosing
-differences after a container rebuild.
+Use the supplied course Dev Container and Node.js 22. Check your Node/npm
+versions before installing dependencies:
 
 ```sh
 node --version
@@ -71,15 +83,8 @@ The build includes type-checking and writes static files to `dist/`. Open the
 preview URL reported by Vite; preview serves the existing build and does not
 rebuild it. Stop preview with Ctrl+C before resuming the local Vite activity.
 
-These steps use the maintained repository's `main`. The tracked `.env` contains
+These steps use the `feature/http-retry` branch. The tracked `.env` contains
 public defaults; `*.local`, `node_modules/` and `dist/` are ignored.
-`.gitattributes` normalises text to LF. The Dev Container applies its Git
-safe-directory and file-mode adjustments only on Windows hosts.
-
-The recorded compatible baseline is Node 22.23.4, npm 10.9.9, TypeScript 5.9.3,
-Vue 3.5.44, Vite 8.3.5 and `vue-tsc` 3.3.13. The backend course examples use
-TypeScript 7.0.2; this SPA deliberately retains 5.9.3 because the current
-`vue-tsc` release does not support TypeScript 7's package exports.
 
 ## Architecture
 
@@ -187,10 +192,219 @@ The base URL must be an absolute HTTP(S) URL ending at `/api`; the adapter appen
 Unexpected responses and network failures remain operational failures. The app
 does not retry POSTs, reveal raw server diagnostics, or fall back to fake data.
 
+## HTTP retries: behaviour and local demonstration
+
+### How retries work
+
+Retries are an infrastructure concern: they control how an HTTP request is
+sent, rather than the rules for adding or listing reviews. The application
+use cases depend on the `ReviewService` port, so they do not need to select
+retries or change when the HTTP policy changes.
+
+The composition root, `src/config/composition-root.ts`, constructs the HTTP
+capability and injects it into the adapter:
+
+```ts
+const request = createRequestWithRetry();
+const reviewService = new HttpReviewService({
+  baseUrl: settings.reviewsBaseUrl,
+  request,
+});
+```
+
+`HttpReviewService` uses the generic `HttpRequestExecutor` contract from
+`src/infra/http-request.ts`. It constructs URLs and request bodies, then
+validates and maps responses into domain values. It does not know whether its
+executor retries. The executor accepts a response-reading callback so that
+the retry policy's timers remain active until the response body has been read.
+
+To select standard HTTP instead, import `createHttpRequest` from
+`../infra/http-request` in the composition root and use
+`const request = createHttpRequest()`. The adapter and use cases stay the same.
+The standard implementation makes a single fetch attempt and honours caller
+cancellation; it adds no retry policy or deadlines. Fake adapters do not make
+HTTP calls and do not retry.
+
+The retry-enabled implementation uses this default policy:
+
+| Concern | Behaviour |
+| --- | --- |
+| Method safety | Only GET can be retried. POST and every other method are attempted at most once. |
+| Retry conditions | GET fetch network failures (`TypeError`), attempt timeouts, and HTTP 408, 429, 500, 502, 503 or 504. |
+| Bound | Three retries means **up to four attempts**, including the first request. A deadline can stop earlier. |
+| Backoff | Exponential delay starting at 200 ms, capped at 5000 ms, with random jitter between 50% and 100% of that delay. |
+| Timeouts | 8 seconds per attempt and 30 seconds for the entire operation, including waits and response-body reading. Both GET and POST have these bounds. |
+| Retry-After | A readable seconds value or HTTP date is a minimum wait before a retry. The total deadline still applies. |
+| Cancellation | A caller's abort stops active work and backoff. Disposing the Vue scope cancels its active list load. An abort is never retried. |
+| Exhaustion | When attempts run out, the caller receives an error with the final HTTP status or network failure. A timeout rejects with `TimeoutError`. The page displays an error message. |
+
+Other HTTP statuses, invalid JSON and invalid review/envelope fields fail without
+retrying. In a browser, a network `TypeError` can also mean CORS blocked a response;
+retries cannot repair CORS. To use `Retry-After` across origins, the API must expose
+that header with `Access-Control-Expose-Headers: Retry-After`. A hidden or invalid
+header falls back to normal backoff.
+
+To explore the policy in code, find the defaults in
+`src/infra/request-with-retry.ts`. The composition root can pass a second
+argument to `createRequestWithRetry(http, options)` to set `maxRetries`,
+`initialDelayMs`, `maxDelayMs`, `attemptTimeoutMs` and `totalTimeoutMs`.
+Pass `undefined` as the first argument to use browser fetch with custom options.
+`listReviews(deps, { signal: controller.signal })` passes cancellation through
+the application port; calling `controller.abort()` cancels it.
+
+### Reuse the HTTP capability in another SPA
+
+Copy these two modules into your own infrastructure folder, keeping them
+together so their relative imports resolve:
+
+- `src/infra/http-request.ts` defines `HttpClient`, `HttpRequestExecutor`, the
+  browser fetch wrapper and the standard `createHttpRequest` implementation.
+- `src/infra/request-with-retry.ts` imports only from `./http-request` and
+  supplies `createRequestWithRetry` and its `RetryOptions` type.
+
+Neither module depends on Reviews, Vue, Vite or application/domain models.
+They assume a modern browser with `fetch`, `Request`, `Response`,
+`AbortController`, `AbortSignal` (including `reason` and `throwIfAborted()`),
+`DOMException` and browser timers. TypeScript needs the DOM library types.
+Use the response-reading callback to consume the body before returning, so
+the retry executor can apply its timeouts during that work.
+
+For example, a weather HTTP adapter can accept the same executor in
+`src/infra/weather-service.ts`:
+
+```ts
+import type { HttpRequestExecutor } from './http-request';
+
+export class WeatherService {
+  constructor(private readonly request: HttpRequestExecutor) {}
+
+  async getForecast(signal?: AbortSignal): Promise<unknown> {
+    return this.request(
+      '/api/weather',
+      { method: 'GET', signal },
+      async (response) => {
+        if (!response.ok) throw new Error(`Weather API status ${response.status}`);
+        return response.json();
+      },
+    );
+  }
+}
+```
+
+In that SPA's composition root, select the executor and inject it:
+
+```ts
+import { createRequestWithRetry } from '../infra/request-with-retry';
+import { WeatherService } from '../infra/weather-service';
+
+const request = createRequestWithRetry();
+const weatherService = new WeatherService(request);
+```
+
+The weather URL is illustrative: use your own API endpoint and validate its
+JSON in the adapter before creating domain values. You do not need to copy
+the Reviews application or change the retry algorithm. To use standard HTTP,
+select `createHttpRequest()` in this composition root instead.
+
+### Prepare the local demonstration
+
+From the repository root inside the Node 22 Dev Container:
+
+```bash
+npm ci
+npm run build
+```
+
+The build includes TypeScript checking. Use the browser activity below to
+observe the retry behaviour.
+
+### Observe recovery in the browser without Azure
+
+Install dependencies as above. Stop any existing Vite server. In one terminal,
+start the temporary demonstration API:
+
+```bash
+npm run demo:retry
+```
+
+It listens at `http://127.0.0.1:7072/api`, returns 503 for its first two GETs, and
+returns a sample review thereafter. Every POST returns 503 and saves nothing.
+The process keeps only a GET counter and prints each request/status. It is a
+deliberately failing demonstration, not the real Reviews API or persistence.
+If port 7072 is occupied, stop the conflicting local process first.
+
+In a second terminal, run Vite with temporary shell overrides. This keeps your
+existing `.env` choices intact:
+
+```bash
+VITE_REVIEWS_SERVICE=http VITE_USE_SEED_DATA=false \
+  VITE_REVIEWS_BASE_URL=http://127.0.0.1:7072/api npm run dev
+```
+
+If using a Dev Container, forward port **7072** in VS Code's Ports panel as well
+as Vite's reported port. Keep its local forwarded port at 7072 so the browser
+can reach the URL above. Open Vite's reported URL, open browser DevTools Network,
+and reload once if necessary to capture requests. The first page load consumes
+the initial failures: restart the demo API and reload the SPA to repeat them.
+
+1. Observe GET statuses **503 → 503 → 200**, with short varying gaps before the
+   retries. The page stays loading until success and displays the sample review
+   titled **GET recovered after two failures**. The demo terminal provides the
+   same request sequence. Further reloads succeed immediately until restart.
+2. Open **+ Add Review**, enter valid review details and submit once. Observe
+   **one POST with status 503**, no automatic repeated POST, and the page's message
+   that it could not confirm the save. The demo logs one POST and saves nothing.
+   A browser CORS OPTIONS preflight may also appear; it is not a repeated POST.
+   This simulated failure saves nothing: it demonstrates the absence of an
+   automatic POST retry. It does not demonstrate a successful write whose
+   response is lost, where a repeated submission could create a duplicate.
+3. To demonstrate network exhaustion, stop the demo API and reload the SPA.
+   Observe up to **four failed GETs**, followed by **Reviews could not be loaded**.
+   Restart the API and reload to recover.
+4. Stop both processes with Ctrl+C. Restart Vite using `npm run dev` to return to
+   your existing `.env` selection. No Azure resources were created by this demo.
+
+### Predict, change and observe the attempt limit
+
+Try this short variation after observing the starter demonstration:
+
+1. Predict what the page will show if the API fails four GET requests before
+   succeeding. Count the initial attempt as well as the three allowed retries.
+2. Stop the demo API. In `scripts/retry-demo-api.mjs`, find
+   `const status = getAttempts <= 2 ? 503 : 200;` and change `2` to `4`.
+   Keep the SPA's retry policy unchanged.
+3. Restart `npm run demo:retry`, then reload the SPA with DevTools Network open.
+   Restarting the API resets its GET counter.
+4. Compare your prediction with the terminal, Network panel and page. Expect
+   four GET responses with status 503, then the page's load-error message.
+   The client stops before a fifth attempt, even though that request would
+   succeed. Reloading the page starts a new operation with its own attempt limit.
+5. Restore the threshold to `2`, restart the demo API and reload the SPA.
+   Confirm that the starter sequence is again **503 → 503 → 200**, then stop
+   both local processes when finished.
+
+This activity illustrates a bounded recovery policy and its limits. It does
+not establish durable delivery, safe write retries or recovery from a prolonged
+outage.
+
+### What HTTP retries do not solve
+
+Retries can mask brief failures; they cannot fix an outage, bad configuration,
+CORS, invalid data or unavailable infrastructure. Waiting and repeating requests
+also adds latency and load. GET must remain a read-only operation in the API.
+This example adds no durable queue, offline delivery, circuit breaker or ordering
+guarantee, and is not evidence of exactly-once processing.
+
+A failed or timed-out POST can have saved data before its response was lost.
+The client therefore does not repeat it automatically. With the real API,
+refresh and check the list before deciding whether to submit again; a manual
+repeat can still create duplicates. Safe automatic write retries need a separate
+server-side idempotency design.
+
 ## No-cloud demonstrations
 
-These supplementary deterministic scripts are demonstrations, not automated tests
-or extra required guided steps:
+Use these supplementary scripts to explore domain validation and the fake
+adapter without Azure:
 
 ```sh
 npm run demo:domain

@@ -2,7 +2,9 @@ import type {
   AddReviewServiceResult,
   ListReviewsOutput,
   ReviewService,
+  ReviewRequestOptions,
 } from '../app/review-service';
+import type { HttpRequestExecutor } from './http-request';
 import { createReview } from '../domain/review';
 import type { Review, ReviewContent, ValidationIssue } from '../domain/review';
 
@@ -12,57 +14,63 @@ type AddReviewRequestDto = {
   readonly comment: string;
 };
 
-export type HttpClient = (
-  input: RequestInfo | URL,
-  init?: RequestInit,
-) => Promise<Response>;
-
 export type HttpReviewServiceOptions = {
   readonly baseUrl: string;
-  readonly http?: HttpClient;
+  readonly request: HttpRequestExecutor;
   readonly headers?: Readonly<Record<string, string>>;
 };
 
 export class HttpReviewService implements ReviewService {
   private readonly baseUrl: string;
-  private readonly http: HttpClient;
+  private readonly request: HttpRequestExecutor;
   private readonly headers: Readonly<Record<string, string>>;
 
   constructor(options: HttpReviewServiceOptions) {
     this.baseUrl = normalizeBaseUrl(options.baseUrl);
-    this.http = options.http ?? defaultHttpClient;
+    this.request = options.request;
     this.headers = { ...(options.headers ?? {}) };
   }
 
-  async listReviews(): Promise<ListReviewsOutput> {
-    const response = await this.http(`${this.baseUrl}/reviews`, {
-      method: 'GET',
-      headers: this.mergeHeaders({ Accept: 'application/json' }),
-    });
-
-    if (!response.ok) throw unexpectedStatus('list', response.status);
-    return decodeListResponse(await parseJson(response));
+  async listReviews(
+    options: ReviewRequestOptions = {},
+  ): Promise<ListReviewsOutput> {
+    return this.request(
+      `${this.baseUrl}/reviews`,
+      {
+        method: 'GET',
+        signal: options.signal,
+        headers: this.mergeHeaders({ Accept: 'application/json' }),
+      },
+      async (response) => {
+        if (!response.ok) throw unexpectedStatus('list', response.status);
+        return decodeListResponse(await parseJson(response));
+      },
+    );
   }
 
   async addReview(input: ReviewContent): Promise<AddReviewServiceResult> {
-    const response = await this.http(`${this.baseUrl}/reviews`, {
-      method: 'POST',
-      headers: this.mergeHeaders({
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-      }),
-      body: JSON.stringify(toAddReviewRequestDto(input)),
-    });
+    return this.request(
+      `${this.baseUrl}/reviews`,
+      {
+        method: 'POST',
+        headers: this.mergeHeaders({
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        }),
+        body: JSON.stringify(toAddReviewRequestDto(input)),
+      },
+      async (response) => {
+        const body = await parseJson(response);
+        if (response.status === 400) {
+          const issues = decodeValidationIssues(body);
+          if (issues) return { success: false, issues };
+          throw new Error('Review API returned an invalid validation response');
+        }
 
-    const body = await parseJson(response);
-    if (response.status === 400) {
-      const issues = decodeValidationIssues(body);
-      if (issues) return { success: false, issues };
-      throw new Error('Review API returned an invalid validation response');
-    }
-
-    if (!response.ok) throw unexpectedStatus('add', response.status);
-    return { success: true, data: decodeAddResponse(body) };
+        if (!response.ok) throw unexpectedStatus('add', response.status);
+        return { success: true, data: decodeAddResponse(body) };
+      },
+    );
   }
 
   private mergeHeaders(
@@ -71,8 +79,6 @@ export class HttpReviewService implements ReviewService {
     return { ...this.headers, ...extra };
   }
 }
-
-const defaultHttpClient: HttpClient = (input, init) => fetch(input, init);
 
 async function parseJson(response: Response): Promise<unknown> {
   const text = await response.text();

@@ -4,6 +4,10 @@ export type ReviewDeps = {
   readonly reviewService: ReviewService;
 };
 
+export type ReviewRequestOptions = {
+  readonly signal?: AbortSignal;
+};
+
 export type ListReviewsOutput = {
   readonly reviews: readonly Review[];
   readonly totalCount: number;
@@ -14,6 +18,6 @@ export type AddReviewServiceResult =
   | { readonly success: false; readonly issues: readonly ValidationIssue[] };
 
 export interface ReviewService {
-  listReviews(): Promise<ListReviewsOutput>;
+  listReviews(options?: ReviewRequestOptions): Promise<ListReviewsOutput>;
   addReview(input: ReviewContent): Promise<AddReviewServiceResult>;
 }
